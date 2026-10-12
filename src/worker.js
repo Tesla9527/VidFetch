@@ -1,5 +1,6 @@
 import {inspectMp4} from './mp4-info.js';
 import {downloadFilename} from '../public/filename.js';
+import {mixinKey,signWbi,embeddedJson} from './bili-wbi.js';
 const UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Version/17.0 Mobile/15E148 Safari/604.1';
 const DESKTOP_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36';
 const APP_UA = 'com.ss.android.ugc.aweme/290100 (Linux; U; Android 13; zh_CN; Pixel 7; Build/TD1A.220804.031)';
@@ -26,16 +27,40 @@ async function upstream(url, init = {}, allowed = domains) {
       if (!location) throw new Error('平台跳转缺少目标地址。');
       await res.body?.cancel(); url = new URL(location, u).href; continue;
     }
-    if (!res.ok) { await res.body?.cancel(); throw new Error(`平台请求失败（${res.status}），请稍后重试。`); }
+    if (!res.ok) { await res.body?.cancel(); const error=new Error(`平台请求失败（${res.status}），请稍后重试。`);error.httpStatus=res.status;throw error; }
     return { res, url: u };
   }
   throw new Error('分享链接跳转次数过多。');
 }
 async function jsonApi(url, cookie = '') {
-  const { res } = await upstream(url, { headers: { Referer: 'https://www.bilibili.com/', ...(cookie ? {Cookie:cookie} : {}) } });
-  const body = await res.json();
-  if (body.code !== 0) throw new Error(`B 站暂时无法解析：${body.message || body.code}`);
-  return body.data;
+  const headers={'User-Agent':DESKTOP_UA,Referer:'https://www.bilibili.com/',Origin:'https://www.bilibili.com',Accept:'application/json','Accept-Language':'zh-CN,zh;q=0.9',...(cookie?{Cookie:cookie}:{})};
+  try {
+    const {res}=await upstream(url,{headers});const body=await res.json();
+    if(body.code!==0){const error=new Error('B 站暂时无法解析：'+(body.message||body.code));error.platformCode=body.code;throw error;}
+    return body.data;
+  }catch(error){
+    const u=new URL(url);
+    if((error.httpStatus===412||[-352,-401].includes(error.platformCode))&&u.pathname==='/x/player/playurl'){
+      const {res}=await upstream('https://api.bilibili.com/x/web-interface/nav',{headers});
+      const nav=await res.json();const key=mixinKey(nav.data?.wbi_img||{});
+      const signed=signWbi(Object.fromEntries(u.searchParams),key);
+      return jsonApi('https://api.bilibili.com/x/player/wbi/playurl?'+signed,cookie);
+    }
+    throw error;
+  }
+}
+async function biliInfo(query,id,cookie){
+  try{return await jsonApi('https://api.bilibili.com/x/web-interface/view?'+query,cookie);}
+  catch(error){
+    if(error.httpStatus!==412&&![-352,-401].includes(error.platformCode))throw error;
+    try{
+      const {res}=await upstream('https://www.bilibili.com/video/'+id+'/',{headers:{'User-Agent':DESKTOP_UA,Referer:'https://www.bilibili.com/',...(cookie?{Cookie:cookie}:{})}});
+      const state=embeddedJson(await res.text(),'window.__INITIAL_STATE__=');
+      const info=state?.videoData;
+      if(info?.bvid && info.pages?.length && (id.toLowerCase().startsWith('av')?String(info.aid)===id.slice(2):info.bvid===id))return info;
+    }catch{/* Return a clear message without exposing response bodies or cookies. */}
+    throw new Error('B 站拒绝了服务器获取视频信息（412）。已尝试公开视频页面，仍未能获取；这可能是服务器出口或平台请求验证限制，更新 Cookie 不一定能解决。');
+  }
 }
 export function cleanCookie(value) {
   if (typeof value !== 'string' || value.length > 24000 || /[\r\n\x00-\x1f\x7f]/.test(value)) throw new Error('Cookie 格式不正确，请只复制请求头 Cookie 的值。');
@@ -72,7 +97,7 @@ export async function parseVideo(input, page = 1, options = {}) {
     const id = url.pathname.match(/\/(BV[\w]+|av\d+)/i)?.[1];
     if (!id) throw new Error('请使用 B 站普通视频链接（BV 或 av）。');
     const query = id.toLowerCase().startsWith('av') ? `aid=${id.slice(2)}` : `bvid=${id}`;
-    const info = await jsonApi(`https://api.bilibili.com/x/web-interface/view?${query}`, cookie);
+    const info = await biliInfo(query,id,cookie);
     const p = Number(page);
     if (!Number.isInteger(p) || p < 1 || p > info.pages.length) throw new Error('所选分 P 不存在。');
     const selected = info.pages[p - 1];
