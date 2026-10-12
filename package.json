@@ -1,0 +1,19 @@
+{
+  "name": "vidfetch",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "dev": "npm run build && wrangler dev",
+    "deploy": "npm run build && wrangler deploy",
+    "test": "node --test",
+    "check": "node --check src/worker.js && node --check src/remux.js && node --check public/app.js && node --check public/quality-picker.js"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  },
+  "dependencies": {
+    "mediabunny": "^1.61.3"
+  }
+}
